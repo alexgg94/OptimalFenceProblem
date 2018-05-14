@@ -377,7 +377,7 @@ bool CalcularCombinacionOptima(int PrimeraCombinacion, int UltimaCombinacion, Pt
 	MejorCombinacion_Parcial.Coste = CosteMejorCombinacion;
 
 	MPI_Reduce(&MejorCombinacion_Parcial, &MejorCombinacion_Global, 1, ctype, myOp, 0, MPI_COMM_WORLD);
-	MPI_Finalize();
+	
 	if (world_rank == 0) {
 		if (MejorCombinacion_Global.Coste == Optimo->Coste)
 			return false;  // No se ha encontrado una combinacin mejor.
@@ -398,6 +398,11 @@ bool CalcularCombinacionOptima(int PrimeraCombinacion, int UltimaCombinacion, Pt
 
 		return true;
   	}
+
+	else
+	{
+		MPI_Finalize();
+	}
 }
 
 
