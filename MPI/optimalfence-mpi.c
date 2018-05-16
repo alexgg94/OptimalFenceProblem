@@ -93,12 +93,14 @@ float CalcularDistancia(int x1, int y1, int x2, int y2);
 int CalcularMaderaArbolesTalados(TListaArboles CombinacionArboles);
 int CalcularCosteCombinacion(TListaArboles CombinacionArboles);
 void MostrarArboles(TListaArboles CombinacionArboles);
-void MiReduccion(EstructuraCombinacion *in, EstructuraCombinacion *inout, int *len, MPI_Datatype *dptr);
+void MiReduccion(void *in, void *inout, int *len, MPI_Datatype *dptr);
 
 
 
 int main(int argc, char *argv[])
 {
+	MPI_Init(NULL, NULL);
+
 	TListaArboles Optimo;
 	char *posicion;
 	int namesrclen;
@@ -155,6 +157,7 @@ int main(int argc, char *argv[])
     printf("\n%.6lf\n", tpivot2-tpivot1);
 
 	exit(0);
+	MPI_Finalize();
 }
 
 
@@ -311,23 +314,28 @@ void OrdenarArboles()
 	}
 }
 
-void MiReduccion(EstructuraCombinacion *in, EstructuraCombinacion *inout, int *len, MPI_Datatype *dptr)
+void MiReduccion(void *in, void *inout, int *len, MPI_Datatype *dptr)
 { 
     EstructuraCombinacion mejor_combinacion;
 	mejor_combinacion.Coste = 999999;
 	int i;
- 
+	
+	EstructuraCombinacion * estructura_combinacion_input = (EstructuraCombinacion *) in;
+	EstructuraCombinacion * estructura_combinacion_output = (EstructuraCombinacion *) inout;
+
 	for (i=0; i< *len; i++) { 
-        if(in->Coste < mejor_combinacion.Coste)
+        if(estructura_combinacion_input->Coste < mejor_combinacion.Coste)
 		{
-			mejor_combinacion.Coste = in->Coste;
-			mejor_combinacion.Id = in->Id;
+			mejor_combinacion.Coste = estructura_combinacion_input->Coste;
+			mejor_combinacion.Id = estructura_combinacion_input->Id;
 		}
 		in++;
     }
 
-	inout->Id = mejor_combinacion.Id;
-	inout->Coste = mejor_combinacion.Coste;
+	estructura_combinacion_output->Id = mejor_combinacion.Id;
+	estructura_combinacion_output->Coste = mejor_combinacion.Coste;
+
+	inout = (void *)estructura_combinacion_output;
 } 
 
 
@@ -343,8 +351,6 @@ bool CalcularCombinacionOptima(int PrimeraCombinacion, int UltimaCombinacion, Pt
 
   	printf("Evaluating combinations: \n");
 	CosteMejorCombinacion = Optimo->Coste;
-
-	MPI_Init(NULL, NULL);
 
 	MPI_Op myOp; 
     MPI_Datatype ctype; 
@@ -379,6 +385,7 @@ bool CalcularCombinacionOptima(int PrimeraCombinacion, int UltimaCombinacion, Pt
 	MPI_Reduce(&MejorCombinacion_Parcial, &MejorCombinacion_Global, 1, ctype, myOp, 0, MPI_COMM_WORLD);
 	
 	if (world_rank == 0) {
+		printf("+Soc el proces %d, la millor combinacio es %d te un cost de %d\n", world_rank, MejorCombinacion_Global.Id, MejorCombinacion_Global.Coste);
 		if (MejorCombinacion_Global.Coste == Optimo->Coste)
 			return false;  // No se ha encontrado una combinacin mejor.
 
