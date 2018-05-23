@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <mpi.h>
 #include <omp.h>
 
 #include "ConvexHull.h"
@@ -35,8 +36,14 @@ struct Bosque
 	int 		NumArboles;
 	TArbol 	Arboles[DMaxArboles];
 };
-typedef struct Bosque TBosque, *PtrBosque;
+typedef struct Bosque TBosque, *PtrBosque; 
 
+
+typedef struct 
+{
+	int Id;
+	int Coste;
+} EstructuraCombinacion;
 
 
 // Problem respresentation
@@ -87,11 +94,18 @@ float CalcularDistancia(int x1, int y1, int x2, int y2);
 int CalcularMaderaArbolesTalados(TListaArboles CombinacionArboles);
 int CalcularCosteCombinacion(TListaArboles CombinacionArboles);
 void MostrarArboles(TListaArboles CombinacionArboles);
+void MiReduccion(void *in, void *inout, int *len, MPI_Datatype *dptr);
 
-
+int world_rank;
+int world_size;
 
 int main(int argc, char *argv[])
 {
+	MPI_Init(NULL, NULL);
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
 	TListaArboles Optimo;
 	char *posicion;
 	int namesrclen;
@@ -119,37 +133,40 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (argc==2)
+	if(world_rank == 0)
 	{
-		len=strlen(argv[1]);
-		posicion = strchr(argv[1], '.');
-		memset(dest, '\0', sizeof(dest));
-		namesrclen=posicion-argv[1];
-		strncpy(dest,argv[1],namesrclen);
-		sprintf(outfile,"%s.res", dest);
-
-		if (!GenerarFicheroSalida(Optimo, outfile))
+	 if (argc==2)
 		{
-			printf("Error writing output file\n");
-			exit(1);
+			len=strlen(argv[1]);
+			posicion = strchr(argv[1], '.');
+			memset(dest, '\0', sizeof(dest));
+			namesrclen=posicion-argv[1];
+			strncpy(dest,argv[1],namesrclen);
+			sprintf(outfile,"%s.res", dest);
+
+			if (!GenerarFicheroSalida(Optimo, outfile))
+			{
+				printf("Error writing output file\n");
+				exit(1);
+			}
 		}
-	}
-	else
-	{
-		if (!GenerarFicheroSalida(Optimo, argv[2]))
+		else
 		{
-			printf("Error writing output file\n");
-			exit(1);
+			if (!GenerarFicheroSalida(Optimo, argv[2]))
+			{
+				printf("Error writing output file\n");
+				exit(1);
+			}
 		}
+
+		gettimeofday(&tim, NULL);
+		tpivot2 = (tim.tv_sec+(tim.tv_usec/1000000.0));
+		printf("\n+%.6lf\n", tpivot2-tpivot1);
 	}
-
-	gettimeofday(&tim, NULL);
-    tpivot2 = (tim.tv_sec+(tim.tv_usec/1000000.0));
-    printf("\n%.6lf\n", tpivot2-tpivot1);
-
+	
 	exit(0);
+	MPI_Finalize();
 }
-
 
 
 bool LeerFicheroEntrada(char *PathFicIn)
@@ -272,10 +289,8 @@ void OrdenarArboles()
 
 	for(a=0; a<(ArbolesEntrada.NumArboles-1); a++)
 	{
-		#pragma omp parallel for ordered
 		for(b=a; b<ArbolesEntrada.NumArboles; b++)
 		{
-			#pragma omp ordered
 			if ( ArbolesEntrada.Arboles[b].Coord.x < ArbolesEntrada.Arboles[a].Coord.x ||
 				 (ArbolesEntrada.Arboles[b].Coord.x == ArbolesEntrada.Arboles[a].Coord.x && ArbolesEntrada.Arboles[b].Coord.y < ArbolesEntrada.Arboles[a].Coord.y) )
 			{
@@ -306,6 +321,29 @@ void OrdenarArboles()
 	}
 }
 
+void MiReduccion(void *in, void *inout, int *len, MPI_Datatype *dptr)
+{ 
+    EstructuraCombinacion mejor_combinacion;
+	mejor_combinacion.Coste = 999999;
+	int i;
+	
+	EstructuraCombinacion * estructura_combinacion_input = (EstructuraCombinacion *) in;
+	EstructuraCombinacion * estructura_combinacion_output = (EstructuraCombinacion *) inout;
+
+	for (i=0; i< *len; i++) { 
+        if(estructura_combinacion_input->Coste < mejor_combinacion.Coste)
+		{
+			mejor_combinacion.Coste = estructura_combinacion_input->Coste;
+			mejor_combinacion.Id = estructura_combinacion_input->Id;
+		}
+		in++;
+    }
+
+	estructura_combinacion_output->Id = mejor_combinacion.Id;
+	estructura_combinacion_output->Coste = mejor_combinacion.Coste;
+
+	inout = (void *)estructura_combinacion_output;
+} 
 
 
 // Computing the optimal combination in a range
@@ -321,42 +359,62 @@ bool CalcularCombinacionOptima(int PrimeraCombinacion, int UltimaCombinacion, Pt
   	printf("Evaluating combinations: \n");
 	CosteMejorCombinacion = Optimo->Coste;
 
+	MPI_Op myOp; 
+    MPI_Datatype ctype; 
+    MPI_Type_contiguous(2, MPI_INT, &ctype ); 
+    MPI_Type_commit( &ctype ); 
+    MPI_Op_create( MiReduccion, true, &myOp );
+
+	EstructuraCombinacion MejorCombinacion_Parcial, MejorCombinacion_Global;
+	
 	#pragma omp parallel for schedule(static) private(Coste)
-	for (Combinacion=PrimeraCombinacion; Combinacion<UltimaCombinacion; Combinacion++)
+	for (Combinacion=PrimeraCombinacion; Combinacion<UltimaCombinacion; Combinacion = Combinacion + world_size)
 	{
 		printf("\tC%d -> \t",Combinacion);
-		Coste = EvaluarCombinacionListaArboles(Combinacion);
+		Coste = EvaluarCombinacionListaArboles(Combinacion + world_rank);
+
 		if ( Coste < CosteMejorCombinacion )
 		#pragma omp critical
 		if ( Coste < CosteMejorCombinacion )
 		{
 			CosteMejorCombinacion = Coste;
-			MejorCombinacion = Combinacion;
+			MejorCombinacion = Combinacion + world_rank;
 			printf("***");
 		}
 		printf("\n");
 	}
 
-	if (CosteMejorCombinacion == Optimo->Coste)
-		return false;  // No se ha encontrado una combinacin mejor.
+	MejorCombinacion_Parcial.Id = MejorCombinacion;
+	MejorCombinacion_Parcial.Coste = CosteMejorCombinacion;
 
-	// Asignar combinacin encontrada.
-	ConvertirCombinacionToArbolesTalados(MejorCombinacion, Optimo);
-	Optimo->Coste = CosteMejorCombinacion;
-	// Calcular estadisticas óptimo.
-	NumArboles = ConvertirCombinacionToArboles(MejorCombinacion, &CombinacionArboles);
-	ObtenerListaCoordenadasArboles(CombinacionArboles, CoordArboles);
-	PuntosCerca = chainHull_2D( CoordArboles, NumArboles, CercaArboles );
+	MPI_Reduce(&MejorCombinacion_Parcial, &MejorCombinacion_Global, 1, ctype, myOp, 0, MPI_COMM_WORLD);
+	
+	if (world_rank == 0) {
+		if (MejorCombinacion_Global.Coste == Optimo->Coste)
+			return false;  // No se ha encontrado una combinacin mejor.
 
-	Optimo->LongitudCerca = CalcularLongitudCerca(CercaArboles, PuntosCerca);
-	MaderaArbolesTalados = CalcularMaderaArbolesTalados(*Optimo);
-	Optimo->MaderaSobrante = MaderaArbolesTalados - Optimo->LongitudCerca;
-	Optimo->CosteArbolesCortados = CosteMejorCombinacion;
-	Optimo->CosteArbolesRestantes = CalcularCosteCombinacion(CombinacionArboles);
+		// Asignar combinacin encontrada.
+		ConvertirCombinacionToArbolesTalados(MejorCombinacion, Optimo);
+		Optimo->Coste = MejorCombinacion_Global.Coste;
+		// Calcular estadisticas óptimo.
+		NumArboles = ConvertirCombinacionToArboles(MejorCombinacion, &CombinacionArboles);
+		ObtenerListaCoordenadasArboles(CombinacionArboles, CoordArboles);
+		PuntosCerca = chainHull_2D( CoordArboles, NumArboles, CercaArboles );
 
-	return true;
+		Optimo->LongitudCerca = CalcularLongitudCerca(CercaArboles, PuntosCerca);
+		MaderaArbolesTalados = CalcularMaderaArbolesTalados(*Optimo);
+		Optimo->MaderaSobrante = MaderaArbolesTalados - Optimo->LongitudCerca;
+		Optimo->CosteArbolesCortados = MejorCombinacion_Global.Coste;
+		Optimo->CosteArbolesRestantes = CalcularCosteCombinacion(CombinacionArboles);
+
+		return true;
+  	}
+
+	else
+	{
+		MPI_Finalize();
+	}
 }
-
 
 
 int EvaluarCombinacionListaArboles(int Combinacion)
@@ -381,20 +439,20 @@ int EvaluarCombinacionListaArboles(int Combinacion)
 	// Evaluar la madera obtenida mediante los arboles talados.
 	// Convertimos la combinacin al vector de arboles no talados.
 	NumArbolesTalados = ConvertirCombinacionToArbolesTalados(Combinacion, &CombinacionArbolesTalados);
-  printf(" %d arboles cortados: ",NumArbolesTalados);
-  MostrarArboles(CombinacionArbolesTalados);
-  MaderaArbolesTalados = CalcularMaderaArbolesTalados(CombinacionArbolesTalados);
-  printf("  Madera:%4.2f  \tCerca:%4.2f ",MaderaArbolesTalados, LongitudCerca);
+	printf(" %d arboles cortados: ",NumArbolesTalados);
+	MostrarArboles(CombinacionArbolesTalados);
+	MaderaArbolesTalados = CalcularMaderaArbolesTalados(CombinacionArbolesTalados);
+	printf("  Madera:%4.2f  \tCerca:%4.2f ",MaderaArbolesTalados, LongitudCerca);
 	if (LongitudCerca > MaderaArbolesTalados)
-	{
-		// Los arboles cortados no tienen suficiente madera para construir la cerca.
-    printf("\tCoste:%d",DMaximoCoste);
-    return DMaximoCoste;
-	}
+		{
+			// Los arboles cortados no tienen suficiente madera para construir la cerca.
+		printf("\tCoste:%d",DMaximoCoste);
+		return DMaximoCoste;
+		}
 
 	// Evaluar el coste de los arboles talados.
 	CosteCombinacion = CalcularCosteCombinacion(CombinacionArbolesTalados);
-  printf("\tCoste:%d",CosteCombinacion);
+	printf("\tCoste:%d",CosteCombinacion);
 
 	return CosteCombinacion;
 }
@@ -520,6 +578,6 @@ void MostrarArboles(TListaArboles CombinacionArboles)
 	for (a=0;a<CombinacionArboles.NumArboles;a++)
 		printf("%d ",ArbolesEntrada.Arboles[CombinacionArboles.Arboles[a]].IdArbol);
 
-  for (;a<ArbolesEntrada.NumArboles;a++)
-    printf("  ");
+  	for (;a<ArbolesEntrada.NumArboles;a++)
+    	printf("  ");
 }
